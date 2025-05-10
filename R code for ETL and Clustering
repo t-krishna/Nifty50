@@ -1,0 +1,94 @@
+# Load required packages
+library(dplyr)
+library(data.table)
+
+# Set working directory
+setwd("C:/NSE_Stocks")
+
+# List all stock CSV files
+file_list <- list.files(pattern = "*.csv")
+
+# Initialize list to store stock data
+stock_data_list <- list()
+
+# Loop through stock files and append
+for (i in 1:length(file_list)) {
+  stock_name <- tools::file_path_sans_ext(file_list[i])
+  temp_data <- fread(file_list[i], stringsAsFactors = FALSE)
+  temp_data$Stock <- stock_name
+  stock_data_list[[i]] <- temp_data
+}
+
+# Combine stock data
+stock_data <- rbindlist(stock_data_list, fill = TRUE)
+
+# Read NIFTY 50 and Bank NIFTY index data
+nifty50_data <- fread("NIFTY50.csv")
+nifty50_data$Stock <- "NIFTY50"
+banknifty_data <- fread("BANKNIFTY.csv")
+banknifty_data$Stock <- "BANKNIFTY"
+
+# Combine all data
+all_data <- rbindlist(list(stock_data, nifty50_data, banknifty_data), fill = TRUE)
+
+# Convert Date and clean
+all_data$Date <- as.Date(all_data$Date, format = "%Y-%m-%d")
+all_data <- all_data %>% 
+  filter(!is.na(Close))
+
+# Filter for NIFTY 50 stocks (example list, adjust based on actual tickers)
+nifty50_tickers <- c("HDFCBANK", "RELIANCE", "INFY", "ICICIBANK", "TCS", "SBIN", "HINDUNILVR", "ITC", "LT", "BAJFINANCE", # Add all 50 tickers
+                     "NIFTY50", "BANKNIFTY")  # Include indices
+all_data <- all_data %>% 
+  filter(Stock %in% nifty50_tickers)
+
+# Assign sectors to NIFTY 50 stocks (example mapping, adjust based on actual data)
+sector_mapping <- data.frame(
+  Stock = c("HDFCBANK", "ICICIBANK", "SBIN", "BAJFINANCE", "RELIANCE", "INFY", "TCS", "HINDUNILVR", "ITC", "LT", "NIFTY50", "BANKNIFTY"),
+  Sector = c("Banking", "Banking", "Banking", "Banking", "Energy", "IT", "IT", "Consumer Goods", "Consumer Goods", "Industrials", "Index", "Index")
+)
+
+# Join sector mapping with data
+all_data <- all_data %>% 
+  left_join(sector_mapping, by = "Stock")
+
+# Adjust for Stock Splits (for stocks, not indices)
+all_data <- all_data %>%
+  arrange(Stock, Date) %>%
+  group_by(Stock) %>%
+  mutate(
+    SplitFactor = if_else(Stock %in% c("NIFTY50", "BANKNIFTY"), 1, cumprod(ifelse(is.na(`Stock Splits`), 1, 1 / `Stock Splits`))),
+    Open = Open * SplitFactor,
+    High = High * SplitFactor,
+    Low = Low * SplitFactor,
+    Close = Close * SplitFactor
+  ) %>%
+  ungroup()
+
+# Ensure numeric columns
+all_data <- all_data %>%
+  mutate(
+    Open = as.numeric(Open),
+    High = as.numeric(High),
+    Low = as.numeric(Low),
+    Close = as.numeric(Close),
+    Volume = as.numeric(Volume),
+    Dividends = as.numeric(Dividends),
+    `Stock Splits` = as.numeric(`Stock Splits`)
+  )
+
+# Calculate metrics for stocks and indices
+all_data <- all_data %>%
+  arrange(Stock, Date) %>%
+  group_by(Stock) %>%
+  mutate(
+    Previous_Close = lag(Close),
+    Daily_Return = (Close - Previous_Close) / Previous_Close * 100,
+    Total_Return = if_else(Stock %in% c("NIFTY50", "BANKNIFTY"), Daily_Return, (Close + Dividends - Previous_Close) / Previous_Close * 100),
+    Intraday_Volatility = (High - Low) / Open * 100
+  ) %>%
+  ungroup() %>%
+  filter(!is.na(Daily_Return))
+
+# Export to CSV
+fwrite(all_data, "C:/NSE_Stocks/Combined_NIFTY50_Sector_Data.csv", row.names = FALSE)
