@@ -1,7 +1,6 @@
 # Load required packages
 library(dplyr)
 library(data.table)
-library(corrplot)
 
 # Set working directory
 setwd("C:/NSE_Stocks")
@@ -27,12 +26,13 @@ niftyauto_data <- combine_csv_files("NIFTYAUTO_.*\\.csv", "NIFTYAUTO")
 niftyfmcg_data <- combine_csv_files("NIFTYFMCG_.*\\.csv", "NIFTYFMCG")
 niftymidcap_data <- combine_csv_files("NIFTYMIDCAP_.*\\.csv", "NIFTYMIDCAP150")
 niftysmallcap_data <- combine_csv_files("NIFTYSMALLCAP_.*\\.csv", "NIFTYSMALLCAP250")
+niftynext50_data <- combine_csv_files("NIFTYNEXT50_.*\\.csv", "NIFTYNEXT50")
 hdfcbank_data <- combine_csv_files("HDFCBANK_.*\\.csv", "HDFCBANK")
 
 # Combine all data
-all_data <- rbindlist(list(nifty50_data, banknifty_data, niftyit_data, niftyauto_data, niftyfmcg_data, niftymidcap_data, niftysmallcap_data, hdfcbank_data), fill = TRUE)
+all_data <- rbindlist(list(nifty50_data, banknifty_data, niftyit_data, niftyauto_data, niftyfmcg_data, niftymidcap_data, niftysmallcap_data, niftynext50_data, hdfcbank_data), fill = TRUE)
 
-# Standardize column names (NSE format: Date, Open, High, Low, Close, Turnover)
+# Standardize column names
 all_data <- all_data %>%
   rename(
     Date = `Date`,
@@ -59,13 +59,14 @@ all_data <- all_data %>%
   ) %>%
   ungroup()
 
-# Assign sectors (using indices as proxies for sectors)
+# Assign sectors and segments
 sector_mapping <- data.frame(
-  Stock = c("HDFCBANK", "NIFTY50", "BANKNIFTY", "NIFTYIT", "NIFTYAUTO", "NIFTYFMCG", "NIFTYMIDCAP150", "NIFTYSMALLCAP250"),
-  Sector = c("Banking", "Index", "Banking", "IT", "Auto", "FMCG", "Midcap", "Smallcap")
+  Stock = c("HDFCBANK", "NIFTY50", "BANKNIFTY", "NIFTYIT", "NIFTYAUTO", "NIFTYFMCG", "NIFTYMIDCAP150", "NIFTYSMALLCAP250", "NIFTYNEXT50"),
+  Sector = c("Banking", "Index", "Banking", "IT", "Auto", "FMCG", "Midcap", "Smallcap", "NextLargeCap"),
+  Segment = c("LargeCap", "LargeCap", "LargeCap", "LargeCap", "LargeCap", "LargeCap", "MidCap", "SmallCap", "NextLargeCap")
 )
 
-# Join sector mapping with data
+# Join sector and segment mapping
 all_data <- all_data %>% 
   left_join(sector_mapping, by = "Stock")
 
@@ -79,7 +80,7 @@ all_data <- all_data %>%
     Volume = as.numeric(Volume)
   )
 
-# Calculate metrics for stocks and indices
+# Calculate metrics
 all_data <- all_data %>%
   arrange(Stock, Date) %>%
   group_by(Stock) %>%
@@ -87,30 +88,98 @@ all_data <- all_data %>%
     Previous_Close = lag(Close),
     Daily_Return = (Close - Previous_Close) / Previous_Close * 100,
     Intraday_Volatility = (High - Low) / Open * 100,
-    MA_50 = zoo::rollmean(Close, k = 50, fill = NA, align = "right"),  # 50-Day Moving Average
+    MA_50 = zoo::rollmean(Close, k = 50, fill = NA, align = "right"),
     Cumulative_Return = cumprod(1 + Daily_Return / 100) - 1,
-    Max_Drawdown = cummax(Cumulative_Return) - Cumulative_Return  # Maximum drawdown
+    Max_Drawdown = cummax(Cumulative_Return) - Cumulative_Return
   ) %>%
   ungroup() %>%
   filter(!is.na(Daily_Return))
 
-# Calculate summary metrics by Stock/Sector
+# Calculate summary metrics by Stock/Sector/Segment
 summary_metrics <- all_data %>%
-  group_by(Stock, Sector) %>%
+  group_by(Stock, Sector, Segment) %>%
   summarise(
-    Avg_Annual_Return = mean(Daily_Return, na.rm = TRUE) * 252 * 100,  # Annualized return (252 trading days)
-    Volatility = sd(Daily_Return, na.rm = TRUE) * sqrt(252) * 100,  # Annualized volatility
+    Avg_Annual_Return = mean(Daily_Return, na.rm = TRUE) * 252 * 100,
+    Volatility = sd(Daily_Return, na.rm = TRUE) * sqrt(252) * 100,
     Max_Drawdown = max(Max_Drawdown, na.rm = TRUE) * 100
   ) %>%
   ungroup()
 
-# Calculate cross-index correlation matrix
-daily_returns <- all_data %>%
-  select(Date, Stock, Daily_Return) %>%
-  tidyr::pivot_wider(names_from = Stock, values_from = Daily_Return)
-correlation_matrix <- cor(daily_returns[, -1], use = "pairwise.complete.obs")
+# Event-Based Impact Analysis for three events
+# Define event periods (3 months each) and pre-event baselines (3 months prior)
+events <- list(
+  Demonetization = list(
+    event_start = as.Date("2016-11-08"),
+    event_end = as.Date("2017-02-08"),
+    pre_start = as.Date("2016-08-08"),
+    pre_end = as.Date("2016-11-07")
+  ),
+  ILFS_Crisis = list(
+    event_start = as.Date("2018-09-01"),
+    event_end = as.Date("2018-12-01"),
+    pre_start = as.Date("2018-06-01"),
+    pre_end = as.Date("2018-08-31")
+  ),
+  COVID19_Crash = list(
+    event_start = as.Date("2020-03-01"),
+    event_end = as.Date("2020-06-01"),
+    pre_start = as.Date("2019-12-01"),
+    pre_end = as.Date("2020-02-29")
+  )
+)
+
+# Function to calculate event metrics
+calculate_event_metrics <- function(data, event_name, event_dates) {
+  pre_data <- data %>%
+    filter(Date >= event_dates$pre_start & Date <= event_dates$pre_end) %>%
+    group_by(Stock) %>%
+    summarise(
+      Pre_Volatility = sd(Daily_Return, na.rm = TRUE) * sqrt(252) * 100,
+      Pre_Close = last(Close)
+    ) %>%
+    ungroup()
+  
+  event_data <- data %>%
+    filter(Date >= event_dates$event_start & Date <= event_dates$event_end) %>%
+    group_by(Stock) %>%
+    summarise(
+      Event_Return = (last(Close) / first(Close) - 1) * 100,
+      Event_Volatility = sd(Daily_Return, na.rm = TRUE) * sqrt(252) * 100,
+      Min_Close = min(Close, na.rm = TRUE)
+    ) %>%
+    ungroup()
+  
+  recovery_data <- data %>%
+    filter(Date >= event_dates$event_start) %>%
+    left_join(pre_data, by = "Stock") %>%
+    group_by(Stock) %>%
+    filter(Close >= Pre_Close) %>%
+    summarise(
+      Recovery_Date = first(Date)
+    ) %>%
+    ungroup()
+  
+  event_metrics <- pre_data %>%
+    left_join(event_data, by = "Stock") %>%
+    left_join(recovery_data, by = "Stock") %>%
+    mutate(
+      Event_Name = event_name,
+      Volatility_Spike = Event_Volatility - Pre_Volatility,
+      Recovery_Days = as.numeric(difftime(Recovery_Date, event_dates$event_start, units = "days"))
+    ) %>%
+    select(Stock, Event_Name, Event_Return, Volatility_Spike, Recovery_Days)
+  
+  return(event_metrics)
+}
+
+# Calculate metrics for each event
+event_metrics <- rbind(
+  calculate_event_metrics(all_data, "Demonetization", events$Demonetization),
+  calculate_event_metrics(all_data, "ILFS_Crisis", events$ILFS_Crisis),
+  calculate_event_metrics(all_data, "COVID19_Crash", events$COVID19_Crash)
+)
 
 # Export data
-fwrite(all_data, "C:/NSE_Stocks/Combined_NIFTY50_MultiIndex_Data_2015.csv", row.names = FALSE)
-fwrite(summary_metrics, "C:/NSE_Stocks/Summary_Metrics_2015.csv", row.names = FALSE)
-write.csv(correlation_matrix, "C:/NSE_Stocks/Correlation_Matrix_2015.csv", row.names = TRUE)
+fwrite(all_data, "C:/NSE_Stocks/Combined_NIFTY50_MultiIndex_Next50_Data_2015.csv", row.names = FALSE)
+fwrite(summary_metrics, "C:/NSE_Stocks/Summary_Metrics_Next50_2015.csv", row.names = FALSE)
+fwrite(event_metrics, "C:/NSE_Stocks/Event_Impact_Metrics_2015.csv", row.names = FALSE)
