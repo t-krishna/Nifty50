@@ -1,69 +1,73 @@
 # Load required packages
 library(dplyr)
 library(data.table)
+library(corrplot)
 
 # Set working directory
 setwd("C:/NSE_Stocks")
 
-# List all stock CSV files
-file_list <- list.files(pattern = "*.csv")
-
-# Initialize list to store stock data
-stock_data_list <- list()
-
-# Loop through stock files and append
-for (i in 1:length(file_list)) {
-  stock_name <- tools::file_path_sans_ext(file_list[i])
-  temp_data <- fread(file_list[i], stringsAsFactors = FALSE)
-  temp_data$Stock <- stock_name
-  stock_data_list[[i]] <- temp_data
+# Function to combine CSV files for a given dataset
+combine_csv_files <- function(file_pattern, stock_name) {
+  file_list <- list.files(pattern = file_pattern)
+  data_list <- list()
+  for (i in 1:length(file_list)) {
+    temp_data <- fread(file_list[i], stringsAsFactors = FALSE)
+    data_list[[i]] <- temp_data
+  }
+  combined_data <- rbindlist(data_list, fill = TRUE)
+  combined_data$Stock <- stock_name
+  return(combined_data)
 }
 
-# Combine stock data
-stock_data <- rbindlist(stock_data_list, fill = TRUE)
-
-# Read NIFTY 50 and Bank NIFTY index data
-nifty50_data <- fread("NIFTY50.csv")
-nifty50_data$Stock <- "NIFTY50"
-banknifty_data <- fread("BANKNIFTY.csv")
-banknifty_data$Stock <- "BANKNIFTY"
+# Combine data for all indices and HDFC Bank
+nifty50_data <- combine_csv_files("NIFTY50_.*\\.csv", "NIFTY50")
+banknifty_data <- combine_csv_files("BANKNIFTY_.*\\.csv", "BANKNIFTY")
+niftyit_data <- combine_csv_files("NIFTYIT_.*\\.csv", "NIFTYIT")
+niftyauto_data <- combine_csv_files("NIFTYAUTO_.*\\.csv", "NIFTYAUTO")
+niftyfmcg_data <- combine_csv_files("NIFTYFMCG_.*\\.csv", "NIFTYFMCG")
+niftymidcap_data <- combine_csv_files("NIFTYMIDCAP_.*\\.csv", "NIFTYMIDCAP150")
+niftysmallcap_data <- combine_csv_files("NIFTYSMALLCAP_.*\\.csv", "NIFTYSMALLCAP250")
+hdfcbank_data <- combine_csv_files("HDFCBANK_.*\\.csv", "HDFCBANK")
 
 # Combine all data
-all_data <- rbindlist(list(stock_data, nifty50_data, banknifty_data), fill = TRUE)
+all_data <- rbindlist(list(nifty50_data, banknifty_data, niftyit_data, niftyauto_data, niftyfmcg_data, niftymidcap_data, niftysmallcap_data, hdfcbank_data), fill = TRUE)
+
+# Standardize column names (NSE format: Date, Open, High, Low, Close, Turnover)
+all_data <- all_data %>%
+  rename(
+    Date = `Date`,
+    Open = `Open`,
+    High = `High`,
+    Low = `Low`,
+    Close = `Close`,
+    Volume = `Turnover`
+  ) %>%
+  select(Date, Open, High, Low, Close, Volume, Stock)
 
 # Convert Date and clean
-all_data$Date <- as.Date(all_data$Date, format = "%Y-%m-%d")
+all_data$Date <- as.Date(all_data$Date, format = "%d-%b-%Y")
 all_data <- all_data %>% 
-  filter(!is.na(Close))
+  filter(!is.na(Close) & !is.na(Date))
 
-# Filter for NIFTY 50 stocks (example list, adjust based on actual tickers)
-nifty50_tickers <- c("HDFCBANK", "RELIANCE", "INFY", "ICICIBANK", "TCS", "SBIN", "HINDUNILVR", "ITC", "LT", "BAJFINANCE", # Add all 50 tickers
-                     "NIFTY50", "BANKNIFTY")  # Include indices
-all_data <- all_data %>% 
-  filter(Stock %in% nifty50_tickers)
+# Flag potential data quality issues
+all_data <- all_data %>%
+  group_by(Stock) %>%
+  mutate(
+    Date_Diff = as.numeric(difftime(Date, lag(Date), units = "days")),
+    Flag_Missing_Days = ifelse(Date_Diff > 5 & !is.na(Date_Diff), 1, 0),
+    Flag_Extreme_Close = ifelse(Close > 1.5 * lag(Close) | Close < 0.5 * lag(Close), 1, 0)
+  ) %>%
+  ungroup()
 
-# Assign sectors to NIFTY 50 stocks (example mapping, adjust based on actual data)
+# Assign sectors (using indices as proxies for sectors)
 sector_mapping <- data.frame(
-  Stock = c("HDFCBANK", "ICICIBANK", "SBIN", "BAJFINANCE", "RELIANCE", "INFY", "TCS", "HINDUNILVR", "ITC", "LT", "NIFTY50", "BANKNIFTY"),
-  Sector = c("Banking", "Banking", "Banking", "Banking", "Energy", "IT", "IT", "Consumer Goods", "Consumer Goods", "Industrials", "Index", "Index")
+  Stock = c("HDFCBANK", "NIFTY50", "BANKNIFTY", "NIFTYIT", "NIFTYAUTO", "NIFTYFMCG", "NIFTYMIDCAP150", "NIFTYSMALLCAP250"),
+  Sector = c("Banking", "Index", "Banking", "IT", "Auto", "FMCG", "Midcap", "Smallcap")
 )
 
 # Join sector mapping with data
 all_data <- all_data %>% 
   left_join(sector_mapping, by = "Stock")
-
-# Adjust for Stock Splits (for stocks, not indices)
-all_data <- all_data %>%
-  arrange(Stock, Date) %>%
-  group_by(Stock) %>%
-  mutate(
-    SplitFactor = if_else(Stock %in% c("NIFTY50", "BANKNIFTY"), 1, cumprod(ifelse(is.na(`Stock Splits`), 1, 1 / `Stock Splits`))),
-    Open = Open * SplitFactor,
-    High = High * SplitFactor,
-    Low = Low * SplitFactor,
-    Close = Close * SplitFactor
-  ) %>%
-  ungroup()
 
 # Ensure numeric columns
 all_data <- all_data %>%
@@ -72,9 +76,7 @@ all_data <- all_data %>%
     High = as.numeric(High),
     Low = as.numeric(Low),
     Close = as.numeric(Close),
-    Volume = as.numeric(Volume),
-    Dividends = as.numeric(Dividends),
-    `Stock Splits` = as.numeric(`Stock Splits`)
+    Volume = as.numeric(Volume)
   )
 
 # Calculate metrics for stocks and indices
@@ -84,11 +86,31 @@ all_data <- all_data %>%
   mutate(
     Previous_Close = lag(Close),
     Daily_Return = (Close - Previous_Close) / Previous_Close * 100,
-    Total_Return = if_else(Stock %in% c("NIFTY50", "BANKNIFTY"), Daily_Return, (Close + Dividends - Previous_Close) / Previous_Close * 100),
-    Intraday_Volatility = (High - Low) / Open * 100
+    Intraday_Volatility = (High - Low) / Open * 100,
+    MA_50 = zoo::rollmean(Close, k = 50, fill = NA, align = "right"),  # 50-Day Moving Average
+    Cumulative_Return = cumprod(1 + Daily_Return / 100) - 1,
+    Max_Drawdown = cummax(Cumulative_Return) - Cumulative_Return  # Maximum drawdown
   ) %>%
   ungroup() %>%
   filter(!is.na(Daily_Return))
 
-# Export to CSV
-fwrite(all_data, "C:/NSE_Stocks/Combined_NIFTY50_Sector_Data.csv", row.names = FALSE)
+# Calculate summary metrics by Stock/Sector
+summary_metrics <- all_data %>%
+  group_by(Stock, Sector) %>%
+  summarise(
+    Avg_Annual_Return = mean(Daily_Return, na.rm = TRUE) * 252 * 100,  # Annualized return (252 trading days)
+    Volatility = sd(Daily_Return, na.rm = TRUE) * sqrt(252) * 100,  # Annualized volatility
+    Max_Drawdown = max(Max_Drawdown, na.rm = TRUE) * 100
+  ) %>%
+  ungroup()
+
+# Calculate cross-index correlation matrix
+daily_returns <- all_data %>%
+  select(Date, Stock, Daily_Return) %>%
+  tidyr::pivot_wider(names_from = Stock, values_from = Daily_Return)
+correlation_matrix <- cor(daily_returns[, -1], use = "pairwise.complete.obs")
+
+# Export data
+fwrite(all_data, "C:/NSE_Stocks/Combined_NIFTY50_MultiIndex_Data_2015.csv", row.names = FALSE)
+fwrite(summary_metrics, "C:/NSE_Stocks/Summary_Metrics_2015.csv", row.names = FALSE)
+write.csv(correlation_matrix, "C:/NSE_Stocks/Correlation_Matrix_2015.csv", row.names = TRUE)
